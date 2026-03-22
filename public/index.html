@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Vamos Bingo - Choose Your Card</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f0f0f0;
+            margin: 0;
+            padding: 10px;
+            text-align: center;
+        }
+        .header {
+            background: #ffcc00;
+            padding: 10px;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        .info {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+            background: #fff;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .card-select {
+            background: white;
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 5px;
+            max-height: 60vh;
+            overflow-y: auto;
+            padding: 5px;
+        }
+        .card-number {
+            background: #f8f8f8;
+            border: 1px solid #ddd;
+            padding: 8px 4px;
+            font-size: 14px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: 0.2s;
+        }
+        .card-number.selected {
+            background: #4caf50;
+            color: white;
+            border-color: #4caf50;
+        }
+        .card-number.taken {
+            background: #ff6666;
+            color: white;
+            cursor: not-allowed;
+            text-decoration: line-through;
+        }
+        button {
+            background: #ff6600;
+            border: none;
+            color: white;
+            padding: 12px 24px;
+            font-size: 1em;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-top: 15px;
+        }
+        .game-area {
+            display: none;
+        }
+        .bingo-card {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 5px;
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        .cell {
+            background: #f8f8f8;
+            border: 1px solid #ccc;
+            padding: 10px;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        .cell.marked {
+            background: #4caf50;
+            color: white;
+        }
+        #called-numbers {
+            background: #fff;
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        .current-call {
+            font-size: 2em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .card-tab {
+            display: inline-block;
+            padding: 5px 10px;
+            margin: 5px;
+            background: #ddd;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .card-tab.active {
+            background: #ffcc00;
+            font-weight: bold;
+        }
+        .cards-container {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">🎲 Vamos Bingo</div>
+    <div class="info">
+        <div>💰 Wallet: <span id="wallet">0</span></div>
+        <div>🎯 Stake: 10</div>
+    </div>
+
+    <!-- Card selection screen -->
+    <div id="cardSelection" class="card-select">
+        <h3>Choose your lucky card</h3>
+        <div id="cardGrid" class="grid"></div>
+        <button id="confirmBtn" disabled>Select Card</button>
+        <p id="cardsCount">You can select up to 3 cards per game.</p>
+    </div>
+
+    <!-- Game screen (hidden initially) -->
+    <div id="gameScreen" style="display: none;">
+        <div id="called-numbers">
+            <strong>Called Numbers:</strong> <span id="called-list"></span>
+        </div>
+        <div class="current-call" id="current-call">-</div>
+        <div id="cardsContainer" class="cards-container"></div>
+        <div class="controls">
+            <button id="bingo-btn">🎉 BINGO 🎉</button>
+        </div>
+    </div>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        const userId = tg.initDataUnsafe?.user?.id;
+        if (!userId) {
+            tg.showAlert('User not authenticated. Please restart.');
+            tg.close();
+        }
+
+        let gameId = null;
+        let userCards = [];
+        let calledNumbers = [];
+        let selectedCardNumber = null;
+        let activeCardIndex = 0;
+        let pollInterval;
+
+        async function buildCardGrid() {
+            const grid = document.getElementById('cardGrid');
+            grid.innerHTML = '';
+            const res = await fetch('/api/game/state');
+            const state = await res.json();
+            const takenCards = (state.used_cards) ? state.used_cards : [];
+            for (let i = 1; i <= 400; i++) {
+                const btn = document.createElement('div');
+                btn.className = 'card-number';
+                if (takenCards.includes(i)) btn.classList.add('taken');
+                btn.textContent = i;
+                btn.onclick = () => selectCard(i);
+                grid.appendChild(btn);
+            }
+        }
+
+        let selectedCardElement = null;
+        function selectCard(num) {
+            if (selectedCardElement) selectedCardElement.classList.remove('selected');
+            selectedCardNumber = num;
+            selectedCardElement = event.target;
+            if (selectedCardElement.classList.contains('taken')) {
+                tg.showAlert('This card is already taken. Please choose another.');
+                selectedCardElement = null;
+                selectedCardNumber = null;
+                document.getElementById('confirmBtn').disabled = true;
+                return;
+            }
+            selectedCardElement.classList.add('selected');
+            document.getElementById('confirmBtn').disabled = false;
+        }
+
+        document.getElementById('confirmBtn').onclick = async () => {
+            if (!selectedCardNumber) return;
+            document.getElementById('confirmBtn').disabled = true;
+            const res = await fetch('/api/select-card', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: parseInt(userId), cardNumber: parseInt(selectedCardNumber) })
+            });
+            const data = await res.json();
+            if (data.success) {
+                gameId = data.gameId;
+                await buildCardGrid();
+                const cardsRes = await fetch(`/api/game/status?userId=${userId}&gameId=${gameId}`);
+                const gameData = await cardsRes.json();
+                const cardsCount = gameData.cards ? gameData.cards.length : 0;
+                document.getElementById('cardsCount').innerText = `You have selected ${cardsCount} card(s). You can select up to 3 cards.`;
+                if (cardsCount >= 3) {
+                    document.getElementById('confirmBtn').style.display = 'none';
+                    startGameSession();
+                } else {
+                    document.getElementById('confirmBtn').disabled = false;
+                }
+            } else {
+                tg.showAlert(data.error || 'Failed to join game. Please try again.');
+                document.getElementById('confirmBtn').disabled = false;
+            }
+        };
+
+        async function startGameSession() {
+            const res = await fetch(`/api/game/status?userId=${userId}&gameId=${gameId}`);
+            const data = await res.json();
+            if (data.error) {
+                tg.showAlert(data.error);
+                tg.close();
+                return;
+            }
+            userCards = data.cards;
+            calledNumbers = data.called_numbers;
+            document.getElementById('cardSelection').style.display = 'none';
+            document.getElementById('gameScreen').style.display = 'block';
+            renderCards();
+            startPolling();
+        }
+
+        function renderCards() {
+            const container = document.getElementById('cardsContainer');
+            container.innerHTML = '';
+            if (userCards.length > 1) {
+                const tabsDiv = document.createElement('div');
+                for (let i = 0; i < userCards.length; i++) {
+                    const tab = document.createElement('span');
+                    tab.className = 'card-tab' + (i === activeCardIndex ? ' active' : '');
+                    tab.textContent = `Card ${i+1}`;
+                    tab.onclick = () => {
+                        activeCardIndex = i;
+                        renderCards();
+                    };
+                    tabsDiv.appendChild(tab);
+                }
+                container.appendChild(tabsDiv);
+            }
+            const card = userCards[activeCardIndex];
+            const cardDiv = document.createElement('div');
+            cardDiv.className = 'bingo-card';
+            for (let i = 0; i < 5; i++) {
+                for (let j = 0; j < 5; j++) {
+                    const num = card[i][j];
+                    const isMarked = (num === 0) || calledNumbers.includes(num);
+                    const cell = document.createElement('div');
+                    cell.className = 'cell' + (isMarked ? ' marked' : '');
+                    cell.textContent = num === 0 ? '★' : num;
+                    cardDiv.appendChild(cell);
+                }
+            }
+            container.appendChild(cardDiv);
+        }
+
+        async function fetchGameStatus() {
+            if (!gameId) return;
+            const res = await fetch(`/api/game/status?userId=${userId}&gameId=${gameId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.status === 'ended') {
+                clearInterval(pollInterval);
+                tg.showAlert('The game has ended. Thank you for playing!');
+                tg.close();
+                return;
+            }
+            if (data.cards) userCards = data.cards;
+            if (data.called_numbers) calledNumbers = data.called_numbers;
+            renderCards();
+            document.getElementById('called-list').textContent = calledNumbers.sort((a,b)=>a-b).join(', ');
+            const last = calledNumbers.length ? calledNumbers[calledNumbers.length-1] : '-';
+            document.getElementById('current-call').textContent = last;
+        }
+
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(fetchGameStatus, 3000);
+        }
+
+        document.getElementById('bingo-btn').onclick = async () => {
+            const res = await fetch('/api/game/bingo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: parseInt(userId), gameId: parseInt(gameId), cardIndex: activeCardIndex })
+            });
+            const result = await res.json();
+            if (result.success) {
+                tg.showAlert(`🎉 Congratulations! You won ${result.prize} birr!`);
+                tg.close();
+            } else {
+                tg.showAlert(result.error || 'Invalid bingo claim.');
+            }
+        };
+
+        async function init() {
+            await buildCardGrid();
+        }
+        init();
+    </script>
+</body>
+</html>
