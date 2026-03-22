@@ -47,9 +47,12 @@ async function initDb() {
             winner_ids TEXT,
             prize_pool REAL DEFAULT 0,
             started_at DATETIME,
-            ended_at DATETIME
+            ended_at DATETIME,
+            used_cards TEXT DEFAULT '[]'
         );
     `);
+    // Add used_cards column if not exists (for older installations)
+    await db.exec(`ALTER TABLE games ADD COLUMN used_cards TEXT DEFAULT '[]'`).catch(() => {});
     console.log('Database initialized');
 }
 
@@ -104,7 +107,6 @@ async function getPendingDeposits() {
 async function approveDeposit(depositId, adminId) {
     const deposit = await db.get('SELECT * FROM deposits WHERE id = ?', depositId);
     if (!deposit || deposit.status !== 'pending') return false;
-    // Update user's non-withdrawable balance (or withdrawable if you prefer)
     await updateBalance(deposit.user_id, deposit.amount, false);
     await db.run('UPDATE deposits SET status = "approved" WHERE id = ?', depositId);
     return true;
@@ -130,7 +132,6 @@ async function getPendingWithdrawals() {
 async function approveWithdrawal(withdrawalId, adminId) {
     const withdrawal = await db.get('SELECT * FROM withdrawals WHERE id = ?', withdrawalId);
     if (!withdrawal || withdrawal.status !== 'pending') return false;
-    // Subtract from user's withdrawable balance
     await updateBalance(withdrawal.user_id, -withdrawal.amount, true);
     await db.run('UPDATE withdrawals SET status = "approved" WHERE id = ?', withdrawalId);
     return true;
@@ -150,11 +151,10 @@ async function getSubAgents(agentId) {
 }
 
 async function addAgentCommission(agentId, amount) {
-    // Add commission to withdrawable balance
     await updateBalance(agentId, amount, true);
 }
 
-// --- Game functions (unchanged) ---
+// --- Game functions ---
 async function getCurrentGame() {
     return db.get('SELECT * FROM games WHERE status = "active" ORDER BY id DESC LIMIT 1');
 }
@@ -204,7 +204,6 @@ async function endGame(gameId, winners) {
         if (user && user.referrer_id) {
             const referrer = await getUser(user.referrer_id);
             if (referrer && referrer.agent_level > 0) {
-                // Commission: 10% of prize
                 await addAgentCommission(referrer.user_id, prizePerWinner * 0.1);
             }
         }
@@ -222,6 +221,62 @@ async function getPlayerCard(gameId, userId) {
     if (!game) return null;
     const cards = JSON.parse(game.cards);
     return cards[userId];
+}
+
+// --- New functions for card selection ---
+async function isCardTaken(gameId, cardNumber) {
+    const game = await db.get('SELECT used_cards FROM games WHERE id = ?', gameId);
+    if (!game) return false;
+    const used = JSON.parse(game.used_cards);
+    return used.includes(cardNumber);
+}
+
+async function addUsedCard(gameId, cardNumber) {
+    const game = await db.get('SELECT used_cards FROM games WHERE id = ?', gameId);
+    const used = JSON.parse(game.used_cards);
+    if (!used.includes(cardNumber)) {
+        used.push(cardNumber);
+        await db.run('UPDATE games SET used_cards = ? WHERE id = ?', JSON.stringify(used), gameId);
+    }
+}
+
+async function getUserCardsInGame(gameId, userId) {
+    const game = await db.get('SELECT cards FROM games WHERE id = ?', gameId);
+    if (!game) return [];
+    const cards = JSON.parse(game.cards);
+    // cards is an object keyed by userId; each value is a card array.
+    // We need to count how many cards this user has.
+    // But currently we store one card per user. We'll extend to support multiple.
+    // For now, we count how many entries for this user? Actually, the structure is one card per user.
+    // To allow multiple cards, we'd need to change schema. For simplicity, we'll implement per-user card limit by storing an array of cards per user.
+    // Let's adapt: store cards as an object: { "userId": [card1, card2, ...] }
+    // We'll rewrite addPlayerToGame and getUserCardsInGame accordingly.
+    // Since this is a big change, we'll create new functions for the new schema.
+    // For now, we'll just return the card if exists, else empty array.
+    const userCards = cards[userId];
+    return userCards ? (Array.isArray(userCards) ? userCards : [userCards]) : [];
+}
+
+// Updated addPlayerCard – adds a card for the user (supports multiple)
+async function addPlayerCard(gameId, userId, card) {
+    const game = await db.get('SELECT players, cards FROM games WHERE id = ?', gameId);
+    let players = JSON.parse(game.players);
+    let cards = JSON.parse(game.cards);
+    if (!players.includes(userId)) {
+        players.push(userId);
+    }
+    if (!cards[userId]) {
+        cards[userId] = [];
+    }
+    cards[userId].push(card);
+    await db.run('UPDATE games SET players = ?, cards = ? WHERE id = ?', JSON.stringify(players), JSON.stringify(cards), gameId);
+}
+
+async function getPlayerCards(gameId, userId) {
+    const game = await db.get('SELECT cards FROM games WHERE id = ?', gameId);
+    if (!game) return [];
+    const cards = JSON.parse(game.cards);
+    return cards[userId] || [];
 }
 
 module.exports = {
@@ -244,10 +299,14 @@ module.exports = {
     getCurrentGame,
     getWaitingGame,
     createGame,
-    addPlayerToGame,
+    addPlayerCard,           // new
+    getPlayerCards,          // new
     startGame,
     addCalledNumber,
     endGame,
     getGameState,
-    getPlayerCard
+    getPlayerCard,
+    isCardTaken,
+    addUsedCard,
+    getUserCardsInGame       // helper
 };

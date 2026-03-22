@@ -40,7 +40,6 @@ bot.start(async (ctx) => {
     if (user) {
         await ctx.reply('Welcome back! Use the menu below.', mainMenu);
     } else {
-        // Check if start parameter is a referral code
         const referralCode = ctx.startPayload;
         ctx.session = { referralCode };
         await ctx.reply(
@@ -77,6 +76,7 @@ bot.on('contact', async (ctx) => {
     );
 });
 
+// --- Play action: deduct stake and send to mini app for card selection ---
 bot.action('play', async (ctx) => {
     const user = await db.getUser(ctx.from.id);
     if (!user) {
@@ -97,30 +97,19 @@ bot.action('play', async (ctx) => {
         await db.updateBalance(user.user_id, -nonWithdrawable, false);
         await db.updateBalance(user.user_id, -remaining, true);
     }
-    // Add to game
-    let game = await db.getWaitingGame();
-    if (!game) {
-        const gameId = await db.createGame();
-        game = { id: gameId, status: 'waiting' };
-    }
-    // Generate a random bingo card (5x5, free center)
-    const card = generateCard();
-    await db.addPlayerToGame(game.id, user.user_id, card);
-    if (game.status === 'waiting') {
-        await db.startGame(game.id);
-    }
-    // Send web app button
+    // Mark that user is in "choose card" mode (no session yet, we'll use context)
+    ctx.session.pendingPlay = true;
     await ctx.reply(
-        '🎉 Best of luck on your gaming adventure! 🎉',
+        '🎉 Best of luck on your gaming adventure! 🎉\n\nTap the button below to choose your lucky card and start the game.',
         Markup.inlineKeyboard([
-            Markup.button.webApp('Play-10', `${config.WEBAPP_URL}/webapp?userId=${user.user_id}&gameId=${game.id}`),
+            Markup.button.webApp('Choose Your Card', `${config.WEBAPP_URL}/webapp`),
             Markup.button.callback('◀️ Back', 'back_main')
         ])
     );
     await ctx.answerCbQuery();
 });
 
-// --- Deposit flow ---
+// --- Deposit flow (with your phone number) ---
 bot.action('deposit', async (ctx) => {
     const user = await db.getUser(ctx.from.id);
     if (!user) {
@@ -139,7 +128,7 @@ bot.action('deposit', async (ctx) => {
 bot.action('deposit_telebirr', async (ctx) => {
     ctx.session.depositMethod = 'telebirr';
     await ctx.reply(
-        "Telebirr Account: 0977444245 -\n\n" +
+        "Telebirr Account: +251953626491\n\n" +
         "Instructions:\n" +
         "1. Send the amount to the above Telebirr account.\n" +
         "2. After payment, you will receive an SMS from Telebirr.\n" +
@@ -152,7 +141,7 @@ bot.action('deposit_telebirr', async (ctx) => {
 bot.action('deposit_cbe', async (ctx) => {
     ctx.session.depositMethod = 'cbe';
     await ctx.reply(
-        "CBE-Birr Account: 0977446445 -\n\n" +
+        "CBE-Birr Account: +251953626491\n\n" +
         "Instructions:\n" +
         "1. Send the amount to the above CBE-Birr account.\n" +
         "2. After payment, you will receive an SMS from CBE.\n" +
@@ -165,9 +154,8 @@ bot.action('deposit_cbe', async (ctx) => {
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     if (ctx.session.depositMethod) {
-        // This is a deposit SMS
         const method = ctx.session.depositMethod;
-        const amount = extractAmountFromSMS(text); // we need a simple parser
+        const amount = extractAmountFromSMS(text);
         if (!amount) {
             await ctx.reply('We could not detect the amount in your SMS. Please include the amount clearly.');
             return;
@@ -176,7 +164,6 @@ bot.on('text', async (ctx) => {
         await ctx.reply('Thank you! Your deposit request has been submitted and will be processed shortly.');
         delete ctx.session.depositMethod;
     } else if (ctx.session.awaitingWithdrawAmount) {
-        // This is a withdrawal amount
         const amount = parseFloat(text);
         if (isNaN(amount) || amount <= 0) {
             await ctx.reply('Please enter a valid positive number.');
@@ -195,10 +182,8 @@ bot.on('text', async (ctx) => {
 });
 
 function extractAmountFromSMS(sms) {
-    // Simple regex: look for a number followed by "birr" or just a number
     const match = sms.match(/(\d+(?:\.\d+)?)\s*(birr|ETB|Br)/i);
     if (match) return parseFloat(match[1]);
-    // fallback: just the first number in the SMS
     const fallback = sms.match(/\d+(?:\.\d+)?/);
     return fallback ? parseFloat(fallback[0]) : null;
 }
@@ -229,7 +214,7 @@ bot.action('balance', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
-// --- Instruction (full text from original bot) ---
+// --- Instruction (full Amharic text) ---
 bot.action('instruction', async (ctx) => {
     const text = `### የበንግ ጨዋታ ህጎች መጨምች ካርድ  
 ጨዋታውን ለመጀመር ከሚመጣልን ከ1-400 የመጨምች ካርድ ውስጥ አንዱን እንመርጣሉን የመጨምች ካርዱ ላይ በቀይ ቀለም የተመረጡ ቆጥሮች የሚያሳዩት መጨምች ካርድ በሌላ ተጨዋች መመረጡን ነው  
@@ -276,7 +261,7 @@ bot.action('agent', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
-// --- Invite Sub-Agent (only for super agents) ---
+// --- Invite Sub-Agent ---
 bot.action('invitesubagent', async (ctx) => {
     const user = await db.getUser(ctx.from.id);
     if (!user) {
@@ -286,7 +271,6 @@ bot.action('invitesubagent', async (ctx) => {
     if (user.agent_level < 2) {
         await ctx.reply('You are not registered as a super agent. Please register as a super agent first.');
     } else {
-        // Provide link for sub-agent registration
         await ctx.reply('Sub-agent registration link will be provided soon.');
     }
     await ctx.answerCbQuery();
@@ -309,7 +293,6 @@ bot.action('back_main', async (ctx) => {
 });
 
 // --- Admin Commands ---
-// Only users in config.ADMINS can use these
 bot.command('admin', async (ctx) => {
     if (!config.ADMINS.includes(ctx.from.id)) {
         await ctx.reply('You are not an admin.');
@@ -382,11 +365,17 @@ bot.command('reject_withdraw', async (ctx) => {
     await ctx.reply(`Withdrawal ${id} rejected.`);
 });
 
-// Helper: generate random bingo card
-function generateCard() {
+// Helper: generate a deterministic bingo card from a seed number
+function generateCardFromNumber(seed) {
     const numbers = Array.from({ length: config.MAX_NUMBER }, (_, i) => i + 1);
+    // Simple linear congruential generator
+    let x = seed;
+    function rand() {
+        x = (x * 9301 + 49297) % 233280;
+        return x / 233280;
+    }
     for (let i = numbers.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(rand() * (i + 1));
         [numbers[i], numbers[j]] = [numbers[j], numbers[i]];
     }
     const card = [];
@@ -402,6 +391,70 @@ app.get('/webapp', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Endpoint to select a card
+app.post('/api/select-card', async (req, res) => {
+    const { userId, cardNumber } = req.body;
+    if (!userId || !cardNumber) {
+        return res.status(400).json({ error: 'Missing parameters' });
+    }
+    const user = await db.getUser(userId);
+    if (!user) {
+        return res.status(403).json({ error: 'User not registered' });
+    }
+    // Get or create a waiting game
+    let game = await db.getWaitingGame();
+    if (!game) {
+        const gameId = await db.createGame();
+        game = { id: gameId, status: 'waiting' };
+    }
+    // Check if user already has maximum cards
+    const userCards = await db.getPlayerCards(game.id, userId);
+    if (userCards.length >= config.MAX_CARDS_PER_USER) {
+        return res.status(400).json({ error: `You already have ${config.MAX_CARDS_PER_USER} cards in this game.` });
+    }
+    // Check if this card number is already taken
+    const taken = await db.isCardTaken(game.id, cardNumber);
+    if (taken) {
+        return res.status(400).json({ error: 'This card number is already taken. Please choose another.' });
+    }
+    // Generate deterministic card
+    const card = generateCardFromNumber(cardNumber);
+    // Add player and card
+    await db.addPlayerCard(game.id, userId, card);
+    await db.addUsedCard(game.id, cardNumber);
+    // If game is waiting, start it now
+    if (game.status === 'waiting') {
+        await db.startGame(game.id);
+        // Calculate prize pool based on number of players (each player's stake)
+        const players = await db.get('SELECT players FROM games WHERE id = ?', game.id);
+        const playerCount = JSON.parse(players.players).length;
+        const prize = playerCount * config.STAKE_AMOUNT;
+        await db.run('UPDATE games SET prize_pool = ? WHERE id = ?', prize, game.id);
+    }
+    res.json({ success: true, gameId: game.id, card: card });
+});
+
+// Endpoint to get current game state (for spectators and players)
+app.get('/api/game/state', async (req, res) => {
+    const game = await db.getCurrentGame();
+    if (!game) {
+        return res.json({ status: 'waiting', message: 'No active game' });
+    }
+    const gameState = await db.getGameState(game.id);
+    const called = JSON.parse(gameState.called_numbers);
+    const players = JSON.parse(gameState.players);
+    const winners = gameState.winner_ids ? JSON.parse(gameState.winner_ids) : [];
+    res.json({
+        status: gameState.status,
+        called_numbers: called,
+        players: players,
+        prize_pool: gameState.prize_pool,
+        winners: winners,
+        last_call: called.length ? called[called.length-1] : null
+    });
+});
+
+// Endpoint for a player to get their own card(s) and the game state
 app.get('/api/game/status', async (req, res) => {
     const { userId, gameId } = req.query;
     if (!userId || !gameId) {
@@ -411,21 +464,23 @@ app.get('/api/game/status', async (req, res) => {
     if (!game) {
         return res.status(404).json({ error: 'Game not found' });
     }
-    const card = await db.getPlayerCard(parseInt(gameId), parseInt(userId));
-    if (!card) {
+    const cards = await db.getPlayerCards(parseInt(gameId), parseInt(userId));
+    if (!cards || cards.length === 0) {
         return res.status(403).json({ error: 'Player not in this game' });
     }
     res.json({
         status: game.status,
         called_numbers: JSON.parse(game.called_numbers),
-        card: card,
+        cards: cards,
         prize_pool: game.prize_pool,
-        players: JSON.parse(game.players)
+        players: JSON.parse(game.players),
+        used_cards: JSON.parse(game.used_cards)
     });
 });
 
+// Endpoint to claim bingo
 app.post('/api/game/bingo', async (req, res) => {
-    const { userId, gameId } = req.body;
+    const { userId, gameId, cardIndex } = req.body;
     if (!userId || !gameId) {
         return res.status(400).json({ error: 'Missing parameters' });
     }
@@ -437,9 +492,14 @@ app.post('/api/game/bingo', async (req, res) => {
     if (!players.includes(parseInt(userId))) {
         return res.status(403).json({ error: 'Not a player in this game' });
     }
-    const card = await db.getPlayerCard(parseInt(gameId), parseInt(userId));
+    const cards = await db.getPlayerCards(parseInt(gameId), parseInt(userId));
+    if (!cards.length) {
+        return res.status(403).json({ error: 'No cards found' });
+    }
+    const cardIdx = cardIndex || 0; // default first card
+    const card = cards[cardIdx];
     const called = JSON.parse(game.called_numbers);
-    // Check bingo pattern
+    // Build marked grid
     const marked = Array(5).fill().map(() => Array(5).fill(false));
     for (let i = 0; i < 5; i++) {
         for (let j = 0; j < 5; j++) {
@@ -448,7 +508,7 @@ app.post('/api/game/bingo', async (req, res) => {
             }
         }
     }
-    marked[2][2] = true; // free space always marked
+    marked[2][2] = true;
     if (!checkBingo(marked)) {
         return res.status(400).json({ error: 'No valid bingo pattern' });
     }
@@ -456,18 +516,16 @@ app.post('/api/game/bingo', async (req, res) => {
     if (game.winner_ids) {
         return res.status(400).json({ error: 'Game already ended' });
     }
-    // End game with this winner
+    // End game with this winner (for now, single winner; multiple could be handled but Joy Bingo splits prize)
     await db.endGame(game.id, [parseInt(userId)]);
     const prize = game.prize_pool; // divided among winners (here single)
     res.json({ success: true, prize: prize });
 });
 
 function checkBingo(marked) {
-    // Check rows
     for (let i = 0; i < 5; i++) {
         if (marked[i].every(v => v)) return true;
     }
-    // Check columns
     for (let j = 0; j < 5; j++) {
         let col = true;
         for (let i = 0; i < 5; i++) {
@@ -475,19 +533,17 @@ function checkBingo(marked) {
         }
         if (col) return true;
     }
-    // Diagonals
     let diag1 = true, diag2 = true;
     for (let i = 0; i < 5; i++) {
         if (!marked[i][i]) diag1 = false;
         if (!marked[i][4-i]) diag2 = false;
     }
     if (diag1 || diag2) return true;
-    // Corners
     if (marked[0][0] && marked[0][4] && marked[4][0] && marked[4][4]) return true;
     return false;
 }
 
-// ---- Background number drawing (every 3 seconds) ----
+// ---- Background number drawing ----
 cron.schedule(`*/${config.DRAW_INTERVAL} * * * * *`, async () => {
     const game = await db.getCurrentGame();
     if (!game) return;
@@ -501,24 +557,31 @@ cron.schedule(`*/${config.DRAW_INTERVAL} * * * * *`, async () => {
     const updatedCalled = [...called, newNumber];
     const winners = [];
     for (const pid of players) {
-        const card = await db.getPlayerCard(game.id, pid);
-        if (!card) continue;
-        const marked = Array(5).fill().map(() => Array(5).fill(false));
-        for (let i = 0; i < 5; i++) {
-            for (let j = 0; j < 5; j++) {
-                if (card[i][j] !== 0 && updatedCalled.includes(card[i][j])) {
-                    marked[i][j] = true;
+        const cards = await db.getPlayerCards(game.id, pid);
+        for (const card of cards) {
+            const marked = Array(5).fill().map(() => Array(5).fill(false));
+            for (let i = 0; i < 5; i++) {
+                for (let j = 0; j < 5; j++) {
+                    if (card[i][j] !== 0 && updatedCalled.includes(card[i][j])) {
+                        marked[i][j] = true;
+                    }
                 }
             }
-        }
-        marked[2][2] = true;
-        if (checkBingo(marked)) {
-            winners.push(pid);
+            marked[2][2] = true;
+            if (checkBingo(marked)) {
+                winners.push(pid);
+                break; // one win per player is enough
+            }
         }
     }
     if (winners.length > 0) {
         await db.endGame(game.id, winners);
-        // Optionally send notifications to winners via Telegram
+        // Notify all players via Telegram that the game ended with winners
+        for (const pid of players) {
+            try {
+                await bot.telegram.sendMessage(pid, `🏆 Game ${game.id} ended! Winner(s): ${winners.join(', ')}. Prize: ${game.prize_pool} birr split.`);
+            } catch (e) {}
+        }
     }
 });
 
@@ -531,7 +594,6 @@ app.post(`/webhook/${config.BOT_TOKEN}`, (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    // Set Telegram webhook
     const webhookUrl = `${config.WEBAPP_URL}/webhook/${config.BOT_TOKEN}`;
     bot.telegram.setWebhook(webhookUrl)
         .then(() => console.log('Webhook set to', webhookUrl))
