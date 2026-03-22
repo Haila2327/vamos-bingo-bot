@@ -40,6 +40,9 @@ bot.start(async (ctx) => {
     if (user) {
         await ctx.reply('Welcome back! Use the menu below.', mainMenu);
     } else {
+        // Check if start parameter is a referral code
+        const referralCode = ctx.startPayload;
+        ctx.session = { referralCode };
         await ctx.reply(
             'Welcome to Vamos Bingo Bot!\n\nPlease click the button "Register Now" below to complete your registration.',
             Markup.inlineKeyboard([Markup.button.callback('Register Now', 'register')])
@@ -66,7 +69,8 @@ bot.on('contact', async (ctx) => {
         await ctx.reply('You are already registered.');
         return;
     }
-    await db.registerUser(contact.user_id, contact.phone_number, contact.first_name);
+    const referrerCode = ctx.session?.referralCode;
+    await db.registerUser(contact.user_id, contact.phone_number, contact.first_name, referrerCode);
     await ctx.reply(
         `You have been successfully registered!\nA 10 birr welcome gift has been deposited into your account.\nClick /play to start the game.`,
         mainMenu
@@ -116,11 +120,102 @@ bot.action('play', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
-bot.action('back_main', async (ctx) => {
-    await ctx.reply('Main menu', mainMenu);
+// --- Deposit flow ---
+bot.action('deposit', async (ctx) => {
+    const user = await db.getUser(ctx.from.id);
+    if (!user) {
+        await ctx.reply('Please register first.');
+        return;
+    }
+    const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('Telebirr', 'deposit_telebirr')],
+        [Markup.button.callback('CBE Birr', 'deposit_cbe')],
+        [Markup.button.callback('◀️ Back', 'back_main')]
+    ]);
+    await ctx.reply('Please select the bank option you wish to use for the top-up.', keyboard);
     await ctx.answerCbQuery();
 });
 
+bot.action('deposit_telebirr', async (ctx) => {
+    ctx.session.depositMethod = 'telebirr';
+    await ctx.reply(
+        "Telebirr Account: 0977444245 -\n\n" +
+        "Instructions:\n" +
+        "1. Send the amount to the above Telebirr account.\n" +
+        "2. After payment, you will receive an SMS from Telebirr.\n" +
+        "3. Copy the SMS and paste it here as a reply.\n\n" +
+        "If you have any issues, contact @VamosBingoSupport"
+    );
+    await ctx.answerCbQuery();
+});
+
+bot.action('deposit_cbe', async (ctx) => {
+    ctx.session.depositMethod = 'cbe';
+    await ctx.reply(
+        "CBE-Birr Account: 0977446445 -\n\n" +
+        "Instructions:\n" +
+        "1. Send the amount to the above CBE-Birr account.\n" +
+        "2. After payment, you will receive an SMS from CBE.\n" +
+        "3. Copy the SMS and paste it here as a reply.\n\n" +
+        "If you have any issues, contact @VamosBingoSupport"
+    );
+    await ctx.answerCbQuery();
+});
+
+bot.on('text', async (ctx) => {
+    const text = ctx.message.text;
+    if (ctx.session.depositMethod) {
+        // This is a deposit SMS
+        const method = ctx.session.depositMethod;
+        const amount = extractAmountFromSMS(text); // we need a simple parser
+        if (!amount) {
+            await ctx.reply('We could not detect the amount in your SMS. Please include the amount clearly.');
+            return;
+        }
+        await db.createDeposit(ctx.from.id, amount, method, text);
+        await ctx.reply('Thank you! Your deposit request has been submitted and will be processed shortly.');
+        delete ctx.session.depositMethod;
+    } else if (ctx.session.awaitingWithdrawAmount) {
+        // This is a withdrawal amount
+        const amount = parseFloat(text);
+        if (isNaN(amount) || amount <= 0) {
+            await ctx.reply('Please enter a valid positive number.');
+            return;
+        }
+        const user = await db.getUser(ctx.from.id);
+        const { withdrawable } = await db.getBalance(user.user_id);
+        if (withdrawable < amount) {
+            await ctx.reply(`Insufficient fund. user: ${user.phone}, amount: ${amount}`);
+            return;
+        }
+        await db.createWithdrawal(ctx.from.id, amount);
+        await ctx.reply(`Withdrawal request for ${amount} birr has been submitted. Our team will process it soon.`);
+        delete ctx.session.awaitingWithdrawAmount;
+    }
+});
+
+function extractAmountFromSMS(sms) {
+    // Simple regex: look for a number followed by "birr" or just a number
+    const match = sms.match(/(\d+(?:\.\d+)?)\s*(birr|ETB|Br)/i);
+    if (match) return parseFloat(match[1]);
+    // fallback: just the first number in the SMS
+    const fallback = sms.match(/\d+(?:\.\d+)?/);
+    return fallback ? parseFloat(fallback[0]) : null;
+}
+
+// --- Withdrawal flow ---
+bot.action('withdraw', async (ctx) => {
+    const user = await db.getUser(ctx.from.id);
+    if (!user) {
+        await ctx.reply('Please register first.');
+        return;
+    }
+    await ctx.reply('Please enter the amount you wish to withdraw.');
+    ctx.session.awaitingWithdrawAmount = true;
+    await ctx.answerCbQuery();
+});
+
+// --- Balance ---
 bot.action('balance', async (ctx) => {
     const user = await db.getUser(ctx.from.id);
     if (!user) {
@@ -134,27 +229,36 @@ bot.action('balance', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
-bot.action('deposit', async (ctx) => {
-    await ctx.reply('Deposit feature coming soon. Please contact support.');
-    await ctx.answerCbQuery();
-});
-
-bot.action('withdraw', async (ctx) => {
-    await ctx.reply('Withdraw feature coming soon. Please contact support.');
-    await ctx.answerCbQuery();
-});
-
+// --- Instruction (full text from original bot) ---
 bot.action('instruction', async (ctx) => {
-    const text = "🎯 How to play Bingo:\n\n1. Click /play to join a game.\n2. A 5x5 card will be generated.\n3. Numbers are drawn every 3 seconds.\n4. Mark numbers on your card as they are called.\n5. When you complete a row, column, diagonal, or all four corners, click BINGO!\n6. The first player(s) to get BINGO win the prize pool.";
-    await ctx.reply(text);
+    const text = `### የበንግ ጨዋታ ህጎች መጨምች ካርድ  
+ጨዋታውን ለመጀመር ከሚመጣልን ከ1-400 የመጨምች ካርድ ውስጥ አንዱን እንመርጣሉን የመጨምች ካርዱ ላይ በቀይ ቀለም የተመረጡ ቆጥሮች የሚያሳዩት መጨምች ካርድ በሌላ ተጨዋች መመረጡን ነው  
+የመጨምች ካርድ ስንነካው ከታች በኩል ካርድ ቆጥሩ የሚያዘዉን መጨምች ካርድ ያሳየፍል ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምክንያ የተሰጠው ለኮንድ ክድ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባፍል  
+
+### ጨዋታ  
+ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቆጥር መሰረት የመጨምች ካርድ እናገጃለን ከላይ በቀኝ በኩል ጨዋታው ለመጀመር ያለዉን ቀሪ ሴኮንድ መቆጠር ይጀምራል  
+ጨዋታው ሲጀምር የተለያዩ ቆጥሮች ከ1 እስከ 75 መጥራት ይጀምራል  
+የሚጠራው ቆጥር የጁ መጨምች ካርድ ዉስጥ ካለ የተጠራዉን ቆጥር ከሌስ በማረግ መምረጥ እንችላለን  
+የመረጥነዉን ቆጥር ማጥፋት ከፈለግን መልሶን እራሱን ቆጠር ክሌክ በማረግ ማጥፋት እንችላለን  
+
+### አሸፍሬ  
+ቆጥሮቹ ሲጠሩ ከመጨምች ካርዱችን ላይ እየመረጥን ወደን ወይም ወይታች ወይም ወደሁለቱም አግደሚ ወይም አራቱን ማእዘናት ከመረጥን ወደኢኤስ ከታች በኩል bingo የሚለዉን በመንካት ማሸነፍ እንችላለን  
+ወደን ወይም ወይታች ወደም ወደሁለቱም አግደሚ ወይም አራቱን ማእዘናት ሳይጠሩ bingo የሚለዉን ክሌክ ካደረግን ከጨዋታው እንታገዳለን  
+ሁለት ወይም ከዚያ በላይ ተጨዋችች እኩል ቢያሸንፉ ደራሹ ላ ቆጥራቸው ይከፈልል።`;
+    await ctx.reply(text, { parse_mode: 'Markdown' });
     await ctx.answerCbQuery();
 });
 
+// --- Support ---
 bot.action('support', async (ctx) => {
-    await ctx.reply('For support, please contact @VamosBingoSupport (not created yet).');
+    const keyboard = Markup.inlineKeyboard([
+        [Markup.button.url('Contact Support', 'https://t.me/VamosBingoSupport')]
+    ]);
+    await ctx.reply('Please click the button below to get in touch with our support team.', keyboard);
     await ctx.answerCbQuery();
 });
 
+// --- Invite ---
 bot.action('invite', async (ctx) => {
     const user = await db.getUser(ctx.from.id);
     if (!user) {
@@ -162,23 +266,120 @@ bot.action('invite', async (ctx) => {
         return;
     }
     const link = `https://t.me/${ctx.bot.botInfo.username}?start=${user.invite_code}`;
-    await ctx.reply(`🎁 Invite friends and earn!\n\nYour referral link:\n${link}`);
+    await ctx.reply(`Here is your referral link:\n${link}\n\nShare it with your friends!`);
     await ctx.answerCbQuery();
 });
 
+// --- Agent Registration ---
 bot.action('agent', async (ctx) => {
-    await ctx.reply('To become an agent, please contact support.');
+    await ctx.reply('To become an agent, please contact our support team using @VamosBingoSupport');
     await ctx.answerCbQuery();
 });
 
+// --- Invite Sub-Agent (only for super agents) ---
 bot.action('invitesubagent', async (ctx) => {
-    await ctx.reply('You are not registered as a super agent.');
+    const user = await db.getUser(ctx.from.id);
+    if (!user) {
+        await ctx.reply('Please register first.');
+        return;
+    }
+    if (user.agent_level < 2) {
+        await ctx.reply('You are not registered as a super agent. Please register as a super agent first.');
+    } else {
+        // Provide link for sub-agent registration
+        await ctx.reply('Sub-agent registration link will be provided soon.');
+    }
     await ctx.answerCbQuery();
 });
 
+// --- Sale ---
 bot.action('sale', async (ctx) => {
-    await ctx.reply('No agent account found.');
+    const user = await db.getUser(ctx.from.id);
+    if (!user || user.agent_level === 0) {
+        await ctx.reply('No agent account found');
+    } else {
+        await ctx.reply('Sale feature coming soon.');
+    }
     await ctx.answerCbQuery();
+});
+
+bot.action('back_main', async (ctx) => {
+    await ctx.reply('Main menu', mainMenu);
+    await ctx.answerCbQuery();
+});
+
+// --- Admin Commands ---
+// Only users in config.ADMINS can use these
+bot.command('admin', async (ctx) => {
+    if (!config.ADMINS.includes(ctx.from.id)) {
+        await ctx.reply('You are not an admin.');
+        return;
+    }
+    const deposits = await db.getPendingDeposits();
+    const withdrawals = await db.getPendingWithdrawals();
+    let msg = '📋 *Pending Approvals*\n\n';
+    if (deposits.length) {
+        msg += '*Deposits:*\n';
+        for (const d of deposits) {
+            msg += `ID: ${d.id} | User: ${d.user_id} | Amount: ${d.amount} | Method: ${d.method}\n`;
+        }
+    } else {
+        msg += 'No pending deposits.\n';
+    }
+    if (withdrawals.length) {
+        msg += '\n*Withdrawals:*\n';
+        for (const w of withdrawals) {
+            msg += `ID: ${w.id} | User: ${w.user_id} | Amount: ${w.amount}\n`;
+        }
+    } else {
+        msg += '\nNo pending withdrawals.\n';
+    }
+    msg += '\nUse:\n/approve_deposit <id>\n/reject_deposit <id>\n/approve_withdraw <id>\n/reject_withdraw <id>';
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.command('approve_deposit', async (ctx) => {
+    if (!config.ADMINS.includes(ctx.from.id)) return;
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) {
+        await ctx.reply('Usage: /approve_deposit <id>');
+        return;
+    }
+    await db.approveDeposit(id, ctx.from.id);
+    await ctx.reply(`Deposit ${id} approved.`);
+});
+
+bot.command('reject_deposit', async (ctx) => {
+    if (!config.ADMINS.includes(ctx.from.id)) return;
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) {
+        await ctx.reply('Usage: /reject_deposit <id>');
+        return;
+    }
+    await db.rejectDeposit(id);
+    await ctx.reply(`Deposit ${id} rejected.`);
+});
+
+bot.command('approve_withdraw', async (ctx) => {
+    if (!config.ADMINS.includes(ctx.from.id)) return;
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) {
+        await ctx.reply('Usage: /approve_withdraw <id>');
+        return;
+    }
+    await db.approveWithdrawal(id, ctx.from.id);
+    await ctx.reply(`Withdrawal ${id} approved.`);
+});
+
+bot.command('reject_withdraw', async (ctx) => {
+    if (!config.ADMINS.includes(ctx.from.id)) return;
+    const id = parseInt(ctx.message.text.split(' ')[1]);
+    if (!id) {
+        await ctx.reply('Usage: /reject_withdraw <id>');
+        return;
+    }
+    await db.rejectWithdrawal(id);
+    await ctx.reply(`Withdrawal ${id} rejected.`);
 });
 
 // Helper: generate random bingo card

@@ -53,7 +53,7 @@ async function initDb() {
     console.log('Database initialized');
 }
 
-// User functions
+// --- User functions ---
 async function getUser(userId) {
     return db.get('SELECT * FROM users WHERE user_id = ?', userId);
 }
@@ -71,7 +71,7 @@ async function registerUser(userId, phone, name, referrerCode = null) {
     );
     // Welcome bonus
     await db.run('UPDATE users SET non_withdrawable = non_withdrawable + 10 WHERE user_id = ?', userId);
-    // Referral bonus
+    // Referral bonus to referrer
     if (referrerId) {
         await db.run('UPDATE users SET withdrawable = withdrawable + 5 WHERE user_id = ?', referrerId);
     }
@@ -88,7 +88,73 @@ async function getBalance(userId) {
     return { withdrawable: user?.withdrawable || 0, nonWithdrawable: user?.non_withdrawable || 0 };
 }
 
-// Game functions
+// --- Deposit functions ---
+async function createDeposit(userId, amount, method, smsText) {
+    const result = await db.run(
+        'INSERT INTO deposits (user_id, amount, method, sms_text, status) VALUES (?, ?, ?, ?, "pending")',
+        userId, amount, method, smsText
+    );
+    return result.lastID;
+}
+
+async function getPendingDeposits() {
+    return db.all('SELECT * FROM deposits WHERE status = "pending" ORDER BY created_at DESC');
+}
+
+async function approveDeposit(depositId, adminId) {
+    const deposit = await db.get('SELECT * FROM deposits WHERE id = ?', depositId);
+    if (!deposit || deposit.status !== 'pending') return false;
+    // Update user's non-withdrawable balance (or withdrawable if you prefer)
+    await updateBalance(deposit.user_id, deposit.amount, false);
+    await db.run('UPDATE deposits SET status = "approved" WHERE id = ?', depositId);
+    return true;
+}
+
+async function rejectDeposit(depositId) {
+    await db.run('UPDATE deposits SET status = "rejected" WHERE id = ?', depositId);
+}
+
+// --- Withdrawal functions ---
+async function createWithdrawal(userId, amount) {
+    const result = await db.run(
+        'INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, "pending")',
+        userId, amount
+    );
+    return result.lastID;
+}
+
+async function getPendingWithdrawals() {
+    return db.all('SELECT * FROM withdrawals WHERE status = "pending" ORDER BY created_at DESC');
+}
+
+async function approveWithdrawal(withdrawalId, adminId) {
+    const withdrawal = await db.get('SELECT * FROM withdrawals WHERE id = ?', withdrawalId);
+    if (!withdrawal || withdrawal.status !== 'pending') return false;
+    // Subtract from user's withdrawable balance
+    await updateBalance(withdrawal.user_id, -withdrawal.amount, true);
+    await db.run('UPDATE withdrawals SET status = "approved" WHERE id = ?', withdrawalId);
+    return true;
+}
+
+async function rejectWithdrawal(withdrawalId) {
+    await db.run('UPDATE withdrawals SET status = "rejected" WHERE id = ?', withdrawalId);
+}
+
+// --- Agent functions ---
+async function setAgentLevel(userId, level) {
+    await db.run('UPDATE users SET agent_level = ? WHERE user_id = ?', level, userId);
+}
+
+async function getSubAgents(agentId) {
+    return db.all('SELECT * FROM users WHERE referrer_id = ? AND agent_level > 0', agentId);
+}
+
+async function addAgentCommission(agentId, amount) {
+    // Add commission to withdrawable balance
+    await updateBalance(agentId, amount, true);
+}
+
+// --- Game functions (unchanged) ---
 async function getCurrentGame() {
     return db.get('SELECT * FROM games WHERE status = "active" ORDER BY id DESC LIMIT 1');
 }
@@ -133,6 +199,15 @@ async function endGame(gameId, winners) {
     const prizePerWinner = game.prize_pool / winners.length;
     for (const winnerId of winners) {
         await updateBalance(winnerId, prizePerWinner, true);
+        // Give commission to referrer/agent if any
+        const user = await getUser(winnerId);
+        if (user && user.referrer_id) {
+            const referrer = await getUser(user.referrer_id);
+            if (referrer && referrer.agent_level > 0) {
+                // Commission: 10% of prize
+                await addAgentCommission(referrer.user_id, prizePerWinner * 0.1);
+            }
+        }
     }
     await db.run('UPDATE games SET status = "ended", winner_ids = ?, ended_at = CURRENT_TIMESTAMP WHERE id = ?',
         JSON.stringify(winners), gameId);
@@ -155,6 +230,17 @@ module.exports = {
     registerUser,
     updateBalance,
     getBalance,
+    createDeposit,
+    getPendingDeposits,
+    approveDeposit,
+    rejectDeposit,
+    createWithdrawal,
+    getPendingWithdrawals,
+    approveWithdrawal,
+    rejectWithdrawal,
+    setAgentLevel,
+    getSubAgents,
+    addAgentCommission,
     getCurrentGame,
     getWaitingGame,
     createGame,
